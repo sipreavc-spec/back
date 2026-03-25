@@ -167,6 +167,60 @@ app.get('/api/vitals/latest', async (req, res) => {
   }
 });
 
+// GET /api/vitals/esp1 -> último registro do ESP1 (cardio: bpm/spo2)
+// Accepts: patientId or patientIds (comma separated)
+app.get('/api/vitals/esp1', async (req, res) => {
+  try {
+    const { patientId, patientIds } = req.query || {};
+    if (!patientId && !patientIds) return res.status(400).json({ error: 'patientId or patientIds is required' });
+
+    const fetchLatestFor = async (pid) => {
+      const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals WHERE patient_id = ? AND bpm IS NOT NULL ORDER BY ts DESC LIMIT 1`;
+      const [rows] = await pool.query(sql, [pid]);
+      return rows && rows.length ? rows[0] : null;
+    };
+
+    if (patientId) {
+      const row = await fetchLatestFor(patientId);
+      return res.json({ entry: row });
+    }
+
+    const ids = String(patientIds).split(',').map(s => s.trim()).filter(Boolean);
+    const results = {};
+    await Promise.all(ids.map(async (pid) => { results[pid] = await fetchLatestFor(pid); }));
+    return res.json({ entries: results });
+  } catch (err) {
+    return handleError(res, err);
+  }
+});
+
+// GET /api/vitals/esp2 -> último registro do ESP2 (temperatura)
+// Accepts: patientId or patientIds (comma separated)
+app.get('/api/vitals/esp2', async (req, res) => {
+  try {
+    const { patientId, patientIds } = req.query || {};
+    if (!patientId && !patientIds) return res.status(400).json({ error: 'patientId or patientIds is required' });
+
+    const fetchLatestFor = async (pid) => {
+      const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals WHERE patient_id = ? AND temperature IS NOT NULL ORDER BY ts DESC LIMIT 1`;
+      const [rows] = await pool.query(sql, [pid]);
+      return rows && rows.length ? rows[0] : null;
+    };
+
+    if (patientId) {
+      const row = await fetchLatestFor(patientId);
+      return res.json({ entry: row });
+    }
+
+    const ids = String(patientIds).split(',').map(s => s.trim()).filter(Boolean);
+    const results = {};
+    await Promise.all(ids.map(async (pid) => { results[pid] = await fetchLatestFor(pid); }));
+    return res.json({ entries: results });
+  } catch (err) {
+    return handleError(res, err);
+  }
+});
+
 
 // Chama antes de iniciar o servidor
 await initDatabase();
