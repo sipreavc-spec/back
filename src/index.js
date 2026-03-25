@@ -173,9 +173,9 @@ app.get('/api/vitals/esp1', async (req, res) => {
   try {
     const { patientId, patientIds } = req.query || {};
     if (!patientId && !patientIds) return res.status(400).json({ error: 'patientId or patientIds is required' });
-
+    // Read from dedicated esp1 table
     const fetchLatestFor = async (pid) => {
-      const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals WHERE patient_id = ? AND bpm IS NOT NULL ORDER BY ts DESC LIMIT 1`;
+      const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals_esp1 WHERE patient_id = ? ORDER BY ts DESC LIMIT 1`;
       const [rows] = await pool.query(sql, [pid]);
       return rows && rows.length ? rows[0] : null;
     };
@@ -194,15 +194,40 @@ app.get('/api/vitals/esp1', async (req, res) => {
   }
 });
 
+// POST /api/vitals/esp1 -> insert a reading into vitals_esp1
+app.post('/api/vitals/esp1', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const patientId = body.patientId || body.patient_id;
+    if (!patientId) return res.status(400).json({ error: 'patientId is required' });
+
+    const bpm = body.bpm != null ? parseInt(body.bpm, 10) : null;
+    const spo2 = body.spo2 != null ? parseInt(body.spo2, 10) : null;
+    const systolic = body.systolic != null ? parseInt(body.systolic, 10) : null;
+    const diastolic = body.diastolic != null ? parseInt(body.diastolic, 10) : null;
+
+    const metaObj = { ...body };
+    delete metaObj.patientId; delete metaObj.patient_id; delete metaObj.bpm; delete metaObj.spo2; delete metaObj.systolic; delete metaObj.diastolic; delete metaObj.temperature;
+
+    const [result] = await pool.query(
+      `INSERT INTO vitals_esp1 (patient_id, bpm, spo2, systolic, diastolic, meta) VALUES (?, ?, ?, ?, ?, ?)`,
+      [patientId, bpm, spo2, systolic, diastolic, JSON.stringify(metaObj)]
+    );
+    return res.status(201).json({ ok: true, id: result.insertId });
+  } catch (err) {
+    return handleError(res, err);
+  }
+});
+
 // GET /api/vitals/esp2 -> último registro do ESP2 (temperatura)
 // Accepts: patientId or patientIds (comma separated)
 app.get('/api/vitals/esp2', async (req, res) => {
   try {
     const { patientId, patientIds } = req.query || {};
     if (!patientId && !patientIds) return res.status(400).json({ error: 'patientId or patientIds is required' });
-
+    // Read from dedicated esp2 table
     const fetchLatestFor = async (pid) => {
-      const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals WHERE patient_id = ? AND temperature IS NOT NULL ORDER BY ts DESC LIMIT 1`;
+      const sql = `SELECT id, patient_id AS patientId, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals_esp2 WHERE patient_id = ? ORDER BY ts DESC LIMIT 1`;
       const [rows] = await pool.query(sql, [pid]);
       return rows && rows.length ? rows[0] : null;
     };
@@ -216,6 +241,28 @@ app.get('/api/vitals/esp2', async (req, res) => {
     const results = {};
     await Promise.all(ids.map(async (pid) => { results[pid] = await fetchLatestFor(pid); }));
     return res.json({ entries: results });
+  } catch (err) {
+    return handleError(res, err);
+  }
+});
+
+// POST /api/vitals/esp2 -> insert a reading into vitals_esp2
+app.post('/api/vitals/esp2', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const patientId = body.patientId || body.patient_id;
+    if (!patientId) return res.status(400).json({ error: 'patientId is required' });
+
+    const temperature = body.temperature != null ? parseFloat(body.temperature) : null;
+
+    const metaObj = { ...body };
+    delete metaObj.patientId; delete metaObj.patient_id; delete metaObj.bpm; delete metaObj.spo2; delete metaObj.systolic; delete metaObj.diastolic; delete metaObj.temperature;
+
+    const [result] = await pool.query(
+      `INSERT INTO vitals_esp2 (patient_id, temperature, meta) VALUES (?, ?, ?)`,
+      [patientId, temperature, JSON.stringify(metaObj)]
+    );
+    return res.status(201).json({ ok: true, id: result.insertId });
   } catch (err) {
     return handleError(res, err);
   }
