@@ -3,12 +3,10 @@ import cors from "cors";
 import dotenv from "dotenv";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import authRouter from "./authRoutes.js";
-
+import jwt from "jsonwebtoken";
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -30,12 +28,6 @@ const pool = mysql.createPool({
   queueLimit: 0,
   ssl: { rejectUnauthorized: false },
 });
-
-// Export pool para usar em authRoutes
-export { pool };
-
-// Mount auth routes
-app.use("/api/auth", authRouter);
 
 // Flag para indicar se o banco está disponível. Se false, usamos fallback em memória.
 let dbAvailable = true;
@@ -104,7 +96,249 @@ async function initDatabase() {
   }
 }
 
+// --------------------
+// Middleware JWT
+// --------------------
+const verifyJWT = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Token não fornecido' });
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'sipre_avc_secret_key_2026_medical_monitoring_system');
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Token inválido' });
+  }
+};
+
+// Helper para gerar JWT
+const generateJWT = (userId, email, role) => {
+  return jwt.sign(
+    { userId, email, role },
+    process.env.JWT_SECRET || 'sipre_avc_secret_key_2026_medical_monitoring_system',
+    { expiresIn: '7d' }
+  );
+};
+
 let lastRfidCode = null; // variável em memória que guarda o último código
+
+// --------------------
+// AUTH ENDPOINTS
+// --------------------
+
+// POST /api/auth/register — Registar novo utilizador
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, name, role, patientId, specialization } = req.body;
+
+    // Validação
+    if (!email || !password || !name || !role) {
+      return res.status(400).json({ error: 'Email, password, name e role são obrigatórios' });
+    }
+
+    if (!['doctor', 'patient'].includes(role)) {
+      return res.status(400).json({ error: 'Role deve ser "doctor" ou "patient"' });
+    }
+
+    // Hash da password
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Insert no banco
+    if (!dbAvailable) {
+      return res.status(503).json({ error: 'Banco de dados indisponível' });
+    }
+
+    const [result, qerr] = await safeQuery(
+      `INSERT INTO users (email, password_hash, name, role, patientId, specialization) VALUES (?, ?, ?, ?, ?, ?)`,
+      [email, passwordHash, name, role, patientId || null, specialization || null]
+    );
+
+    if (!result) {
+      return res.status(500).json({ error: 'Erro ao registar utilizador' });
+    }
+
+    const userId = result.insertId;
+
+    // Gerar JWT
+    const token = generateJWT(userId, email, role);
+
+    // Retornar dados do utilizador
+    return res.status(201).json({
+      ok: true,
+      token,
+      user: { id: userId, email, name, role, patientId: patientId || null, specialization: specialization || null }
+    });
+  } catch (err) {
+    console.error('Erro ao registar:', err.message);
+    if (err.message.includes('Duplicate entry')) {
+      return res.status(409).json({ error: 'Email já está registado' });
+    }
+    return res.status(500).json({ error: 'Erro ao registar utilizador' });
+  }
+});
+
+// POST /api/auth/login — Login
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email e password são obrigatórios' });
+    }
+
+    if (!dbAvailable) {
+      return res.status(503).json({ error: 'Banco de dados indisponível' });
+    }
+
+    // Buscar utilizador
+    const [rows, qerr] = await safeQuery(
+      `SELECT id, email, password_hash, name, role, patientId, specialization FROM users WHERE email = ? LIMIT 1`,
+      [email]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    const user = rows[0];
+
+    // Verificar password
+    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: 'Credenciais inválidas' });
+    }
+
+    // Gerar JWT
+    const token = generateJWT(user.id, user.email, user.role);
+
+    return res.json({
+      ok: true,
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        patientId: user.patientId,
+        specialization: user.specialization
+      }
+    });
+  } catch (err) {
+    console.error('Erro no login:', err.message);
+    return res.status(500).json({ error: 'Erro ao fazer login' });
+  }
+});
+
+// GET /api/auth/me — Obter dados do utilizador autenticado
+app.get('/api/auth/me', verifyJWT, async (req, res) => {
+  try {
+    if (!dbAvailable) {
+      return res.status(503).json({ error: 'Banco de dados indisponível' });
+    }
+
+    const [rows, qerr] = await safeQuery(
+      `SELECT id, email, name, role, patientId, specialization FROM users WHERE id = ? LIMIT 1`,
+      [req.user.userId]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ error: 'Utilizador não encontrado' });
+    }
+
+    const user = rows[0];
+    return res.json({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      patientId: user.patientId,
+      specialization: user.specialization
+    });
+  } catch (err) {
+    console.error('Erro ao obter utilizador:', err.message);
+    return res.status(500).json({ error: 'Erro ao obter utilizador' });
+  }
+});
+
+// PUT /api/auth/profile — Atualizar perfil
+app.put('/api/auth/profile', verifyJWT, async (req, res) => {
+  try {
+    const { name, specialization } = req.body;
+
+    if (!dbAvailable) {
+      return res.status(503).json({ error: 'Banco de dados indisponível' });
+    }
+
+    const [result, qerr] = await safeQuery(
+      `UPDATE users SET name = ?, specialization = ? WHERE id = ?`,
+      [name || null, specialization || null, req.user.userId]
+    );
+
+    if (!result) {
+      return res.status(500).json({ error: 'Erro ao atualizar perfil' });
+    }
+
+    return res.json({ ok: true, message: 'Perfil atualizado com sucesso' });
+  } catch (err) {
+    console.error('Erro ao atualizar perfil:', err.message);
+    return res.status(500).json({ error: 'Erro ao atualizar perfil' });
+  }
+});
+
+// PUT /api/auth/password — Alterar password
+app.put('/api/auth/password', verifyJWT, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'CurrentPassword e newPassword são obrigatórios' });
+    }
+
+    if (!dbAvailable) {
+      return res.status(503).json({ error: 'Banco de dados indisponível' });
+    }
+
+    // Buscar utilizador
+    const [rows, qerr] = await safeQuery(
+      `SELECT password_hash FROM users WHERE id = ? LIMIT 1`,
+      [req.user.userId]
+    );
+
+    if (!rows || rows.length === 0) {
+      return res.status(404).json({ error: 'Utilizador não encontrado' });
+    }
+
+    const user = rows[0];
+
+    // Verificar password atual
+    const isPasswordValid = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!isPasswordValid) {
+      return res.status(401).json({ error: 'Password atual incorreta' });
+    }
+
+    // Hash nova password
+    const newPasswordHash = await bcrypt.hash(newPassword, 10);
+
+    // Atualizar
+    const [updateResult, updateErr] = await safeQuery(
+      `UPDATE users SET password_hash = ? WHERE id = ?`,
+      [newPasswordHash, req.user.userId]
+    );
+
+    if (!updateResult) {
+      return res.status(500).json({ error: 'Erro ao alterar password' });
+    }
+
+    return res.json({ ok: true, message: 'Password alterada com sucesso' });
+  } catch (err) {
+    console.error('Erro ao alterar password:', err.message);
+    return res.status(500).json({ error: 'Erro ao alterar password' });
+  }
+});
 
 // Endpoint que o ESP32 chama para enviar o código RFID
 app.post('/rfid', (req, res) => {
