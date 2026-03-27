@@ -28,6 +28,51 @@ const pool = mysql.createPool({
   ssl: { rejectUnauthorized: false },
 });
 
+// Flag para indicar se o banco está disponível. Se false, usamos fallback em memória.
+let dbAvailable = true;
+
+// Storage em memória como fallback para ambiente de desenvolvimento sem DB
+const memStore = {
+  _id: 1,
+  vitals: [], // array de entradas gerais
+  esp1: [],   // array de leituras ESP1
+  esp2: [],   // array de leituras ESP2
+};
+
+const nowMs = () => Date.now();
+
+function insertMem(table, entry) {
+  const e = { id: memStore._id++, patientId: entry.patientId, ts: nowMs(), meta: entry.meta || {}, ...entry };
+  if (table === 'vitals') memStore.vitals.unshift(e);
+  else if (table === 'esp1') memStore.esp1.unshift(e);
+  else if (table === 'esp2') memStore.esp2.unshift(e);
+  return e;
+}
+
+function getLatestMem(table, pid) {
+  const arr = table === 'esp1' ? memStore.esp1 : table === 'esp2' ? memStore.esp2 : memStore.vitals;
+  const found = arr.find(item => item.patientId === pid);
+  return found || null;
+}
+
+function getEntriesMem(pid, limit=100, offset=0, since) {
+  let arr = memStore.vitals.filter(e => e.patientId === pid);
+  if (since) arr = arr.filter(e => e.ts >= parseInt(since,10));
+  return arr.slice(offset, offset + limit);
+}
+
+// Safe wrapper around pool.query that marks DB unavailable on error
+async function safeQuery(sql, params=[]) {
+  try {
+    return await pool.query(sql, params);
+  } catch (err) {
+    console.error('DB query error:', err && err.code ? `${err.code} ${err.message}` : err.message || err);
+    dbAvailable = false;
+    console.warn('⚠️ Banco indisponível — alternando para fallback em memória.');
+    return [null, err];
+  }
+}
+
 // Corrigir __dirname (pois em ES Modules ele não existe direto)
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,11 +84,14 @@ async function initDatabase() {
     const sql = fs.readFileSync(sqlPath, "utf8");
 
     console.log("🟢 Inicializando o banco de dados...");
-    await pool.query(sql);
-    
+    const [initRes, initErr] = await safeQuery(sql);
+    if (!initRes) throw initErr || new Error('db init failed');
     console.log("✅ Banco de dados inicializado com sucesso!");
   } catch (err) {
     console.error("❌ Erro ao inicializar o banco de dados:", err.message);
+    // Se falhar (ex: DNS ENOTFOUND em ambiente local), desativa uso do banco e usa fallback em memória
+    dbAvailable = false;
+    console.warn("⚠️ Banco indisponível — usando fallback em memória para desenvolvimento.");
   }
 }
 
@@ -85,10 +133,20 @@ app.post('/api/vitals', async (req, res) => {
     const metaObj = { ...body };
     delete metaObj.patientId; delete metaObj.patient_id; delete metaObj.bpm; delete metaObj.spo2; delete metaObj.systolic; delete metaObj.diastolic; delete metaObj.temperature;
 
-    const [result] = await pool.query(
+    if (!dbAvailable) {
+      const e = insertMem('vitals', { patientId, bpm, spo2, systolic, diastolic, temperature, meta: metaObj });
+      return res.status(201).json({ ok: true, id: e.id });
+    }
+
+    const [result, qerr] = await safeQuery(
       `INSERT INTO vitals (patient_id, bpm, spo2, systolic, diastolic, temperature, meta) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [patientId, bpm, spo2, systolic, diastolic, temperature, JSON.stringify(metaObj)]
     );
+    if (!result) {
+      // DB failed during insert, fallback to memory
+      const e = insertMem('vitals', { patientId, bpm, spo2, systolic, diastolic, temperature, meta: metaObj });
+      return res.status(201).json({ ok: true, id: e.id });
+    }
 
     return res.status(201).json({ ok: true, id: result.insertId });
   } catch (err) {
@@ -123,8 +181,19 @@ app.get('/api/vitals', async (req, res) => {
     params.push(l);
     params.push(o);
 
+    if (!dbAvailable) {
+      if (!patientId) return res.json({ total: 0, entries: [] });
+      const rows = getEntriesMem(patientId, l, o, since).map(r => ({ id: r.id, patientId: r.patientId, bpm: r.bpm, spo2: r.spo2, systolic: r.systolic, diastolic: r.diastolic, temperature: r.temperature, meta: r.meta, ts: r.ts }));
+      return res.json({ total: rows.length, entries: rows });
+    }
+
     const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals ${where} ORDER BY ts DESC LIMIT ? OFFSET ?`;
-    const [rows] = await pool.query(sql, params);
+    const [rows, qerr] = await safeQuery(sql, params);
+    if (!rows) {
+      if (!patientId) return res.json({ total: 0, entries: [] });
+      const memRows = getEntriesMem(patientId, l, o, since).map(r => ({ id: r.id, patientId: r.patientId, bpm: r.bpm, spo2: r.spo2, systolic: r.systolic, diastolic: r.diastolic, temperature: r.temperature, meta: r.meta, ts: r.ts }));
+      return res.json({ total: memRows.length, entries: memRows });
+    }
     return res.json({ total: rows.length, entries: rows });
   } catch (err) {
     return handleError(res, err);
@@ -144,8 +213,14 @@ app.get('/api/vitals/latest', async (req, res) => {
 
     // helper to fetch one latest row for a patient
     const fetchLatestFor = async (pid) => {
+      if (!dbAvailable) {
+        const r = getLatestMem('vitals', pid);
+        if (!r) return null;
+        return { id: r.id, patientId: r.patientId, bpm: r.bpm, spo2: r.spo2, systolic: r.systolic, diastolic: r.diastolic, temperature: r.temperature, meta: r.meta, ts: r.ts };
+      }
       const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals WHERE patient_id = ? ORDER BY ts DESC LIMIT 1`;
-      const [rows] = await pool.query(sql, [pid]);
+      const [rows, qerr] = await safeQuery(sql, [pid]);
+      if (!rows) return null;
       return rows && rows.length ? rows[0] : null;
     };
 
@@ -175,8 +250,14 @@ app.get('/api/vitals/esp1', async (req, res) => {
     if (!patientId && !patientIds) return res.status(400).json({ error: 'patientId or patientIds is required' });
     // Read from dedicated esp1 table
     const fetchLatestFor = async (pid) => {
+      if (!dbAvailable) {
+        const r = getLatestMem('esp1', pid);
+        if (!r) return null;
+        return { id: r.id, patientId: r.patientId, bpm: r.bpm, spo2: r.spo2, systolic: r.systolic, diastolic: r.diastolic, meta: r.meta, ts: r.ts };
+      }
       const sql = `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals_esp1 WHERE patient_id = ? ORDER BY ts DESC LIMIT 1`;
-      const [rows] = await pool.query(sql, [pid]);
+      const [rows, qerr] = await safeQuery(sql, [pid]);
+      if (!rows) return null;
       return rows && rows.length ? rows[0] : null;
     };
 
@@ -209,10 +290,19 @@ app.post('/api/vitals/esp1', async (req, res) => {
     const metaObj = { ...body };
     delete metaObj.patientId; delete metaObj.patient_id; delete metaObj.bpm; delete metaObj.spo2; delete metaObj.systolic; delete metaObj.diastolic; delete metaObj.temperature;
 
-    const [result] = await pool.query(
+    if (!dbAvailable) {
+      const e = insertMem('esp1', { patientId, bpm, spo2, systolic, diastolic, meta: metaObj });
+      return res.status(201).json({ ok: true, id: e.id });
+    }
+
+    const [result, qerr] = await safeQuery(
       `INSERT INTO vitals_esp1 (patient_id, bpm, spo2, systolic, diastolic, meta) VALUES (?, ?, ?, ?, ?, ?)`,
       [patientId, bpm, spo2, systolic, diastolic, JSON.stringify(metaObj)]
     );
+    if (!result) {
+      const e = insertMem('esp1', { patientId, bpm, spo2, systolic, diastolic, meta: metaObj });
+      return res.status(201).json({ ok: true, id: e.id });
+    }
     return res.status(201).json({ ok: true, id: result.insertId });
   } catch (err) {
     return handleError(res, err);
@@ -223,12 +313,18 @@ app.post('/api/vitals/esp1', async (req, res) => {
 // Accepts: patientId or patientIds (comma separated)
 app.get('/api/vitals/esp2', async (req, res) => {
   try {
-    const { patientId, patientIds } = req.query || {};
+    const { patientId, patientIds } = req.query || { patientId: "paciente123" };
     if (!patientId && !patientIds) return res.status(400).json({ error: 'patientId or patientIds is required' });
     // Read from dedicated esp2 table
     const fetchLatestFor = async (pid) => {
+      if (!dbAvailable) {
+        const r = getLatestMem('esp2', pid);
+        if (!r) return null;
+        return { id: r.id, patientId: r.patientId, temperature: r.temperature, meta: r.meta, ts: r.ts };
+      }
       const sql = `SELECT id, patient_id AS patientId, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals_esp2 WHERE patient_id = ? ORDER BY ts DESC LIMIT 1`;
-      const [rows] = await pool.query(sql, [pid]);
+      const [rows, qerr] = await safeQuery(sql, [pid]);
+      if (!rows) return null;
       return rows && rows.length ? rows[0] : null;
     };
 
@@ -258,10 +354,19 @@ app.post('/api/vitals/esp2', async (req, res) => {
     const metaObj = { ...body };
     delete metaObj.patientId; delete metaObj.patient_id; delete metaObj.bpm; delete metaObj.spo2; delete metaObj.systolic; delete metaObj.diastolic; delete metaObj.temperature;
 
-    const [result] = await pool.query(
+    if (!dbAvailable) {
+      const e = insertMem('esp2', { patientId, temperature, meta: metaObj });
+      return res.status(201).json({ ok: true, id: e.id });
+    }
+
+    const [result, qerr] = await safeQuery(
       `INSERT INTO vitals_esp2 (patient_id, temperature, meta) VALUES (?, ?, ?)`,
       [patientId, temperature, JSON.stringify(metaObj)]
     );
+    if (!result) {
+      const e = insertMem('esp2', { patientId, temperature, meta: metaObj });
+      return res.status(201).json({ ok: true, id: e.id });
+    }
     return res.status(201).json({ ok: true, id: result.insertId });
   } catch (err) {
     return handleError(res, err);
@@ -295,16 +400,19 @@ app.get("/", (req, res) => {
 // Endpoint para listar todas as tabelas do banco de dados
 app.get("/tabelas", async (req, res) => {
   try {
-    const [rows] = await pool.query("SHOW TABLES");
-    
+    if (!dbAvailable) {
+      const tabelas = ['vitals', 'vitals_esp1', 'vitals_esp2'];
+      return res.json({ sucesso: true, total: tabelas.length, tabelas });
+    }
+
+    const [rows, qerr] = await safeQuery("SHOW TABLES");
+    if (!rows) {
+      const tabelas = ['vitals', 'vitals_esp1', 'vitals_esp2'];
+      return res.json({ sucesso: true, total: tabelas.length, tabelas });
+    }
     // Extrai o nome das tabelas (a chave depende do nome do banco)
     const tabelas = rows.map(row => Object.values(row)[0]);
-    
-    res.json({
-      sucesso: true,
-      total: tabelas.length,
-      tabelas
-    });
+    res.json({ sucesso: true, total: tabelas.length, tabelas });
   } catch (err) {
     console.error("Erro ao listar tabelas:", err.message);
     res.status(500).json({
