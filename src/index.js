@@ -3,9 +3,12 @@ import cors from "cors";
 import dotenv from "dotenv";
 import mysql from "mysql2/promise";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import authRouter from "./authRoutes.js";
+
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -27,6 +30,12 @@ const pool = mysql.createPool({
   queueLimit: 0,
   ssl: { rejectUnauthorized: false },
 });
+
+// Export pool para usar em authRoutes
+export { pool };
+
+// Mount auth routes
+app.use("/api/auth", authRouter);
 
 // Flag para indicar se o banco está disponível. Se false, usamos fallback em memória.
 let dbAvailable = true;
