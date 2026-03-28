@@ -275,6 +275,49 @@ app.get('/api/vitals/esp1', async (req, res) => {
   }
 });
 
+// GET /api/vitals/esp1/history -> histórico de leituras do ESP1
+app.get('/api/vitals/esp1/history', async (req, res) => {
+  try {
+    const { patientId } = req.query || {};
+    if (!patientId) return res.status(400).json({ error: 'patientId is required' });
+    
+    const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
+    const offset = parseInt(req.query.offset || '0', 10);
+    
+    if (!dbAvailable) {
+      const arr = memStore.esp1.filter(e => e.patientId === patientId);
+      const results = arr.slice(offset, offset + limit).map(e => ({
+        id: e.id,
+        patientId: e.patientId,
+        bpm: e.bpm,
+        spo2: e.spo2,
+        systolic: e.systolic,
+        diastolic: e.diastolic,
+        meta: e.meta,
+        ts: e.ts
+      }));
+      return res.json({ entries: results, total: arr.length });
+    }
+    
+    const [rows, qerr] = await safeQuery(
+      `SELECT id, patient_id AS patientId, bpm, spo2, systolic, diastolic, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals_esp1 WHERE patient_id = ? ORDER BY ts DESC LIMIT ? OFFSET ?`,
+      [patientId, limit, offset]
+    );
+    const [totalRows, totalErr] = await safeQuery(`SELECT COUNT(*) as cnt FROM vitals_esp1 WHERE patient_id = ?`, [patientId]);
+    
+    if (!rows) {
+      const arr = memStore.esp1.filter(e => e.patientId === patientId);
+      const results = arr.slice(offset, offset + limit);
+      return res.json({ entries: results, total: arr.length });
+    }
+    
+    const total = totalRows && totalRows[0] ? totalRows[0].cnt : 0;
+    return res.json({ entries: rows || [], total });
+  } catch (err) {
+    return handleError(res, err);
+  }
+});
+
 // POST /api/vitals/esp1 -> insert a reading into vitals_esp1
 app.post('/api/vitals/esp1', async (req, res) => {
   try {
@@ -337,6 +380,46 @@ app.get('/api/vitals/esp2', async (req, res) => {
     const results = {};
     await Promise.all(ids.map(async (pid) => { results[pid] = await fetchLatestFor(pid); }));
     return res.json({ entries: results });
+  } catch (err) {
+    return handleError(res, err);
+  }
+});
+
+// GET /api/vitals/esp2/history -> histórico de leituras do ESP2
+app.get('/api/vitals/esp2/history', async (req, res) => {
+  try {
+    const { patientId } = req.query || {};
+    if (!patientId) return res.status(400).json({ error: 'patientId is required' });
+    
+    const limit = Math.min(parseInt(req.query.limit || '100', 10), 500);
+    const offset = parseInt(req.query.offset || '0', 10);
+    
+    if (!dbAvailable) {
+      const arr = memStore.esp2.filter(e => e.patientId === patientId);
+      const results = arr.slice(offset, offset + limit).map(e => ({
+        id: e.id,
+        patientId: e.patientId,
+        temperature: e.temperature,
+        meta: e.meta,
+        ts: e.ts
+      }));
+      return res.json({ entries: results, total: arr.length });
+    }
+    
+    const [rows, qerr] = await safeQuery(
+      `SELECT id, patient_id AS patientId, temperature, meta, UNIX_TIMESTAMP(ts)*1000 AS ts FROM vitals_esp2 WHERE patient_id = ? ORDER BY ts DESC LIMIT ? OFFSET ?`,
+      [patientId, limit, offset]
+    );
+    const [totalRows, totalErr] = await safeQuery(`SELECT COUNT(*) as cnt FROM vitals_esp2 WHERE patient_id = ?`, [patientId]);
+    
+    if (!rows) {
+      const arr = memStore.esp2.filter(e => e.patientId === patientId);
+      const results = arr.slice(offset, offset + limit);
+      return res.json({ entries: results, total: arr.length });
+    }
+    
+    const total = totalRows && totalRows[0] ? totalRows[0].cnt : 0;
+    return res.json({ entries: rows || [], total });
   } catch (err) {
     return handleError(res, err);
   }
