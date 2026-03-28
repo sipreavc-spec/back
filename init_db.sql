@@ -1,18 +1,3 @@
--- Tabela para armazenar utilizadores (médicos e pacientes)
-CREATE TABLE IF NOT EXISTS `users` (
-	`id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-	`email` VARCHAR(255) NOT NULL UNIQUE,
-	`password_hash` VARCHAR(255) NOT NULL,
-	`name` VARCHAR(255) NOT NULL,
-	`role` ENUM('doctor', 'patient') NOT NULL,
-	`patientId` VARCHAR(128) NULL UNIQUE,
-	`specialization` VARCHAR(255) NULL,
-	`createdAt` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-	`updatedAt` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-	PRIMARY KEY (`id`),
-	INDEX `idx_email` (`email`),
-	INDEX `idx_patientId` (`patientId`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Tabela para armazenar leituras de sinais vitais enviadas pelos dispositivos (ESP32)
 CREATE TABLE IF NOT EXISTS `vitals` (
