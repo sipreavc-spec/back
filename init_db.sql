@@ -39,3 +39,20 @@ CREATE TABLE IF NOT EXISTS `vitals_esp2` (
 	INDEX `idx_esp2_patient_ts` (`patient_id`, `ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Tabela de usuários para autenticação
+CREATE TABLE IF NOT EXISTS `users` (
+	`id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
+	`email` VARCHAR(255) NOT NULL UNIQUE,
+	`password` VARCHAR(255) NOT NULL,
+	`name` VARCHAR(255) NOT NULL,
+	`role` ENUM('patient', 'doctor') NOT NULL DEFAULT 'patient',
+	`patient_id` VARCHAR(128),
+	`is_active` BOOLEAN DEFAULT TRUE,
+	`created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+	`updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+	PRIMARY KEY (`id`),
+	INDEX `idx_email` (`email`),
+	INDEX `idx_role` (`role`),
+	INDEX `idx_patient_id` (`patient_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+

@@ -6,6 +6,15 @@ import bcrypt from "bcryptjs";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import {
+  hashPassword,
+  comparePassword,
+  generateToken,
+  verifyToken,
+  authMiddleware,
+  validateEmail,
+  validatePassword,
+} from "./auth.js";
 dotenv.config();
 const app = express();
 app.use(cors());
@@ -505,7 +514,136 @@ app.get("/tabelas", async (req, res) => {
   }
 });
 
+// ─── AUTENTICAÇÃO ──────────────────────────────────────────────────
 
+// POST /auth/register -> Registrar novo usuário
+app.post('/auth/register', async (req, res) => {
+  try {
+    const { email, password, name, role = 'patient' } = req.body;
+
+    // Validações
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Email, password e name são obrigatórios' });
+    }
+
+    if (!validateEmail(email)) {
+      return res.status(400).json({ error: 'Email inválido' });
+    }
+
+    if (!validatePassword(password)) {
+      return res.status(400).json({ error: 'Senha deve ter pelo menos 8 caracteres, 1 letra e 1 número' });
+    }
+
+    if (!['patient', 'doctor'].includes(role)) {
+      return res.status(400).json({ error: 'Role deve ser "patient" ou "doctor"' });
+    }
+
+    // Verificar se email já existe
+    const [existingUser, checkErr] = await safeQuery('SELECT id FROM users WHERE email = ?', [email]);
+    if (existingUser && existingUser.length > 0) {
+      return res.status(409).json({ error: 'Email já cadastrado' });
+    }
+
+    // Hash password
+    const hashedPassword = await hashPassword(password);
+
+    // Inserir novo usuário
+    if (!dbAvailable) {
+      return res.status(503).json({ error: 'Banco de dados indisponível' });
+    }
+
+    const [result, insertErr] = await safeQuery(
+      'INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)',
+      [email, hashedPassword, name, role]
+    );
+
+    if (!result) {
+      console.error('Insert error:', insertErr);
+      return res.status(500).json({ error: 'Erro ao registrar usuário' });
+    }
+
+    const user = { id: result.insertId, email, name, role };
+    const token = generateToken(user);
+
+    return res.status(201).json({ ok: true, token, user });
+  } catch (err) {
+    console.error('Register error:', err);
+    return res.status(500).json({ error: 'Erro ao registrar usuário' });
+  }
+});
+
+// POST /auth/login -> Fazer login
+app.post('/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email e password são obrigatórios' });
+    }
+
+    // Buscar usuário
+    const [users, queryErr] = await safeQuery(
+      'SELECT id, email, password, name, role, is_active FROM users WHERE email = ?',
+      [email]
+    );
+
+    if (!users || users.length === 0) {
+      return res.status(401).json({ error: 'Email ou senha incorretos' });
+    }
+
+    const user = users[0];
+
+    // Verificar se está ativo
+    if (!user.is_active) {
+      return res.status(401).json({ error: 'Usuário desativado' });
+    }
+
+    // Verificar senha
+    const validPassword = await comparePassword(password, user.password);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Email ou senha incorretos' });
+    }
+
+    // Gerar token
+    const userData = { id: user.id, email: user.email, name: user.name, role: user.role };
+    const token = generateToken(userData);
+
+    return res.json({ ok: true, token, user: userData });
+  } catch (err) {
+    console.error('Login error:', err);
+    return res.status(500).json({ error: 'Erro ao fazer login' });
+  }
+});
+
+// POST /auth/validate -> Validar token
+app.post('/auth/validate', (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Authorization header missing' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    if (!token) {
+      return res.status(401).json({ error: 'Token missing' });
+    }
+
+    const decoded = verifyToken(token);
+    if (!decoded) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+
+    return res.json({ ok: true, user: decoded });
+  } catch (err) {
+    console.error('Validate error:', err);
+    return res.status(500).json({ error: 'Erro ao validar token' });
+  }
+});
+
+// GET /auth/me -> Obter dados do usuário autenticado
+app.get('/auth/me', authMiddleware, (req, res) => {
+  return res.json({ ok: true, user: req.user });
+});
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 4000;
 app.listen(PORT, () => console.log(`SIpre AVC API rodando na porta ${PORT}`));
